@@ -242,12 +242,13 @@ class VimeoBackup(object):
             
         return self._archive_dirs[vimeo_id]        
     
-    def ensure_current(self, vimeo_id:int):
+    def ensure_current(self, vimeo_id:int, metadata_json=None):
         """
         Download a video’s metadata and compare the modified_time to the
         local file. If needed, this will start a media download.
         """
-        metadata_json = self.download_metadata_json(vimeo_id)
+        if not metadata_json:
+            metadata_json = self.download_metadata_json(vimeo_id)
         metadata = json.loads(metadata_json)
 
         ad = self._archive_dirs.get(vimeo_id, None)
@@ -311,11 +312,11 @@ class VimeoBackup(object):
 
     def sync(self):
         # Get the latest change stored locally.
-        try:
-            latest_local_change = max(self._archive_dirs.values(),
-                                      key=lambda ar: ar.mtime).mtime
-        except ValueError:
-            latest_local_change = 0
+        #try:
+        #    latest_local_change = max(self._archive_dirs.values(),
+        #                              key=lambda ar: ar.mtime).mtime
+        #except ValueError:
+        #    latest_local_change = 0
 
         def videos():
             next_uri = "/me/videos?direction=desc&sort=modified_time"
@@ -327,18 +328,17 @@ class VimeoBackup(object):
 
                 next_uri = returned["paging"]["next"]
                 for video in returned["data"]:
-                    dt = parse_timestamp(video["modified_time"])
-                    modified_time = dt.timestamp()
+                    #dt = parse_timestamp(video["modified_time"])
+                    #modified_time = dt.timestamp()
 
                     # For starters
-                    latest_local_change = 0
+                    #latest_local_change = 0
                     
-                    if modified_time < latest_local_change:
-                        next_uri = None
-                        break
-                    else:
-                        yield video
-
+                    #if modified_time < latest_local_change:
+                    #    next_uri = None
+                    #    break
+                    #else:
+                    yield video
 
         for video in videos():
             uri = video["uri"]
@@ -346,7 +346,7 @@ class VimeoBackup(object):
             vimeo_id = int(parts[-1])
 
             if vimeo_id not in self._archive_dirs:
-                self._download(vimeo_id, json.dumps(video))
+                self.ensure_current(vimeo_id, json.dumps(video))
         
             
 if __name__ == "__main__":
