@@ -16,12 +16,27 @@ from t4.typography import pretty_bytes
 class DownloadLocked(Exception):
     pass
 
+class NoOriginalDownloadError(Exception):
+    pass
+
 def parse_timestamp(s):
     """
     Return a datetime object for vimeo timestamp `s`.
     """
     return datetime.datetime.fromisoformat(s.split("+")[0])
 
+def original_ctime(metadata):
+    """
+    Lookup the original download’s create_time field,
+    parse it, and return as (Unix-)timestamp.
+    """
+    for d in metadata["download"]:
+        if d["quality"] == "source":
+            return parse_timestamp(d["created_time"]).timestamp()
+    else:
+        raise NoOriginalDownloadError(
+            "No original download available for %i “%s”" % (
+                vimeo_id, metadata["name"]))
 
 def report_progress_on(item, done, extra=None, metainfo=None):
     pass
@@ -46,8 +61,8 @@ class ArchiveDir(object):
         else:
             self.vimeo_id = int(match.group(1))
         
-        self.abspath = op.join(backup.local_root, dirname)
-
+        self.abspath = op.join(backup.local_root, dirname)           
+        
     @classmethod
     def download(ArchiveDir, backup, metadata_json):
         """
@@ -71,41 +86,37 @@ class ArchiveDir(object):
                 original_download = d
                 break
         else:
-            raise IOError("No original download available.")
+            raise NoOriginalDownloadError(
+                "No original download available for %i “%s”" % (
+                    vimeo_id, metadata["name"]))
 
         url = original_download["link"]
 
-        ext = ""
-        parts = url.split("?", 1)
-        if (parts):
-            qs = parts[-1]
-            fields = urllib.parse.parse_qs(qs)
-            original_filename = fields.get("filename", None)
-            if original_filename:
-                original_filename = original_filename[0]
-                name, ext = op.splitext(original_filename)
-                if ext == ".":
-                    ext = ""
-                
+        fields = urllib.parse.urlparse(url)
+        path = urllib.parse.unquote(fields.path)
+        parts = path.split("/")
+        filename = safe_filename(parts[-1])
+        fn, ext = op.splitext(filename)
+        
         name = metadata["name"]
-        filename = safe_filename(name)        
+        filename = safe_filename(name)
+        
         dirname = "%i %s" % ( vimeo_id, filename, )
         filename += ext
-
         # Create the temporary output directory.
-        abspath = op.join(backup.local_root, "tmp." + dirname)
-        os.mkdir(abspath)
+        tmppath = op.join(backup.local_root, "tmp." + dirname)
+        os.mkdir(tmppath)
 
         try:
             # Write the metadata
-            with open(op.join(abspath, "metadata.json"), "w") as fp:
+            with open(op.join(tmppath, "metadata.json"), "w") as fp:
                 fp.write(metadata_json)
 
             size = original_download["size"]
 
             msg = f"Loading “{filename}”"
             report(msg, end="")
-            outpath = op.join(abspath, filename)
+            outpath = op.join(tmppath, filename)
             with urllib.request.urlopen(url) as infp, \
                  open(outpath, "wb") as outfp:
                 bytes_read = 0
@@ -122,7 +133,7 @@ class ArchiveDir(object):
                                            pretty_bytes(bytes_read),
                                            metainfo={"vimeo_id": vimeo_id})
             report(" done.")
-            
+          
             # Check, if we got it all
             if os.path.getsize(outpath) != size:
                 try:
@@ -133,19 +144,38 @@ class ArchiveDir(object):
                 raise IOError("Failed to download " + url)
         except (Exception, KeyboardInterrupt) as e:
             # On failure, remove the output directory.
-            shutil.rmtree(abspath, ignore_errors=True)
+            shutil.rmtree(tmppath, ignore_errors=True)
             raise
 
 
-        os.rename(abspath, op.join(backup.local_root, dirname))
-        abspath = op.join(backup.local_root, dirname)
+        target_path = op.join(backup.local_root, dirname)
 
-        # Set out directory’s mtime.
-        mtime = parse_timestamp(metadata["modified_time"])
-        timestamp = mtime.timestamp()
+        if op.exists(target_path):
+            archive_path = op.join(backup.local_root, "Archive")
+            if not op.exists(archive_path):
+                os.mkdir(archive_path)
+
+            idx = 1
+            while True:
+                backup_path = op.join(archive_path, f"{dirname}.{idx}")
+        
+                if op.exists(backup_path):
+                    idx += 1
+                else:
+                    break
+
+            # Move the old version of the video to the archive.
+            os.rename(target_path, backup_path)
+
+        # Move the version just downloaded to its proper location.
+        os.rename(tmppath, target_path)
+
+        # Set our directory’s mtime.
+        timestamp = original_ctime(metadata)
+        
         # This is in UTC and as a definition, that’s what we want,
-        # no metter what our operating system tinks about it.
-        os.utime(abspath, (timestamp, timestamp,))
+        # no metter what our operating system thinks about it.
+        os.utime(target_path, (timestamp, timestamp,))
 
         return ArchiveDir(backup, dirname)
         
@@ -233,8 +263,11 @@ class VimeoBackup(object):
 
     def _download(self, vimeo_id, metadata_json):
         with self.lock_download(vimeo_id):
-            ad = ArchiveDir.download(self, metadata_json)
-            self._archive_dirs[vimeo_id] = ad        
+            try:
+                ad = ArchiveDir.download(self, metadata_json)
+                self._archive_dirs[vimeo_id] = ad
+            except NoOriginalDownloadError as e:
+                print(e, file=sys.stderr)
     
     def _archive_dir(self, vimeo_id):
         if vimeo_id not in self._archive_dirs:
@@ -258,7 +291,9 @@ class VimeoBackup(object):
         else:
             local_mtime = 0
 
-        remote_mtime = parse_timestamp(metadata["modified_time"]).timestamp()
+        remote_mtime = original_ctime(metadata)
+
+
         if remote_mtime > local_mtime:
             self._download(vimeo_id, metadata_json)
 
@@ -311,13 +346,6 @@ class VimeoBackup(object):
 
 
     def sync(self):
-        # Get the latest change stored locally.
-        #try:
-        #    latest_local_change = max(self._archive_dirs.values(),
-        #                              key=lambda ar: ar.mtime).mtime
-        #except ValueError:
-        #    latest_local_change = 0
-
         def videos():
             next_uri = "/me/videos?direction=desc&sort=modified_time"
             
@@ -328,16 +356,6 @@ class VimeoBackup(object):
 
                 next_uri = returned["paging"]["next"]
                 for video in returned["data"]:
-                    #dt = parse_timestamp(video["modified_time"])
-                    #modified_time = dt.timestamp()
-
-                    # For starters
-                    #latest_local_change = 0
-                    
-                    #if modified_time < latest_local_change:
-                    #    next_uri = None
-                    #    break
-                    #else:
                     yield video
 
         for video in videos():
@@ -345,7 +363,7 @@ class VimeoBackup(object):
             parts = uri.split("/")
             vimeo_id = int(parts[-1])
 
-            if vimeo_id not in self._archive_dirs:
+            if vimeo_id:
                 self.ensure_current(vimeo_id, json.dumps(video))
         
             
@@ -380,9 +398,13 @@ if __name__ == "__main__":
         "download", help="Download media for a specific Video by id.")
     download_parser.add_argument("vimeo_ids", type=int, nargs="+")
 
-    download_parser = subparsers.add_parser(
+    sync_parser = subparsers.add_parser(
         "sync", help="Sync local data with vimeo.com.")
     
+    check_parser = subparsers.add_parser(
+        "check", help="Check mtime for a specific Video by id.")
+    check_parser.add_argument("vimeo_ids", type=int, nargs="+")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -415,5 +437,12 @@ if __name__ == "__main__":
                 pass
     elif args.command == "sync":
         backup.sync()
+    elif args.command == "check":
+        for vimeo_id in args.vimeo_ids:
+            try:
+                backup.ensure_current(vimeo_id)
+            except DownloadLocked:
+                pass
+
 
     
