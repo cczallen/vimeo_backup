@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """\
 This script maintains a local copy of your uploads to vimeo.com using the official PyVimeo library.
-此程式使用官方 PyVimeo 庫來備份你在 vimeo.com 上的上傳內容。
+此程式使用官方 PyVimeo 庫來備份你在 vimeo.com 上的上傳內容，同時也提供資料夾結構檢視功能。
 """
 
 import sys, os, os.path as op, re, threading, functools, datetime, runpy, time
@@ -9,28 +9,28 @@ import urllib.request, urllib.parse, json, shutil
 from tqdm import tqdm
 from contextlib import contextmanager
 import dateutil.parser
-
 import ssl
 import certifi
+
 # 建立 SSL 上下文，使用 certifi 提供的根憑證
 ssl_context = ssl.create_default_context(cafile=certifi.where())
 
 # 使用官方 PyVimeo 庫
 from vimeo import VimeoClient
 
-# 若無 t4 模組，請自行建立以下兩個檔案：
-# t4/title_to_id.py:
-#   import re
-#   def safe_filename(name):
-#       return re.sub(r'[\\/:"*?<>|]+', "", name)
+# 以下 t4 模組若無法取得，請自行實作簡易版本：
+# --- t4/title_to_id.py ---
+# import re
+# def safe_filename(name):
+#     return re.sub(r'[\\/:"*?<>|]+', "", name)
 #
-# t4/typography.py:
-#   def pretty_bytes(num):
-#       for unit in ['B','KB','MB','GB','TB']:
-#           if num < 1024.0:
-#               return f"{num:.1f}{unit}"
-#           num /= 1024.0
-#       return f"{num:.1f}PB"
+# --- t4/typography.py ---
+# def pretty_bytes(num):
+#     for unit in ['B','KB','MB','GB','TB']:
+#         if num < 1024.0:
+#             return f"{num:.1f}{unit}"
+#         num /= 1024.0
+#     return f"{num:.1f}PB"
 from t4.title_to_id import safe_filename
 from t4.typography import pretty_bytes
 
@@ -63,7 +63,7 @@ def original_ctime(metadata):
             "No original download available for %s “%s” (無法取得影片 %s 的原始下載)" % (video_id, metadata["name"], video_id))
 
 def report_progress_on(item, done, extra=None, metainfo=None):
-    # 此函式可擴充以顯示更詳細的進度，目前留空。
+    # 此函式可擴充以顯示詳細進度，目前留空。
     pass
 
 def report(*things, end="\n"):
@@ -102,8 +102,7 @@ class ArchiveDir(object):
 
         url = original_download["link"]
         size = original_download["size"]
-
-        # 輸出分隔線與影片基本資訊 (中英文雙語)
+        # 印出分隔線與影片基本資訊 (中英文雙語)
         print("\n\n----------------------------------------")
         print(f"下載影片 ID (Downloading video ID): {vimeo_id}  Title: {metadata['name']}")
         print(f"檔案大小 (File size): {pretty_bytes(size)}")
@@ -130,7 +129,7 @@ class ArchiveDir(object):
             start_time = time.time()
             with urllib.request.urlopen(url, context=ssl_context) as infp, open(outpath, "wb") as outfp:
                 blocksize = 102400
-                # 使用 tqdm 進度條，更新間隔 1 秒
+                # 使用 tqdm 進度條，設定每 1 秒更新一次
                 with tqdm(total=size, unit='B', unit_scale=True, desc=filename, mininterval=1) as pbar:
                     while True:
                         bytes_chunk = infp.read(blocksize)
@@ -141,7 +140,7 @@ class ArchiveDir(object):
             end_time = time.time()
             elapsed = end_time - start_time
             avg_speed = size / elapsed if elapsed > 0 else 0
-            # 在下載完成 log 前加換行
+            # 在下載完成 log 前加入換行
             print("")
             print(f"下載完成 (Download completed) {filename}: 用時 {elapsed:.1f} 秒，平均速度 {pretty_bytes(avg_speed)}/s (Elapsed {elapsed:.1f} sec, Average speed {pretty_bytes(avg_speed)}/s)")
             if os.path.getsize(outpath) != size:
@@ -243,7 +242,7 @@ class VimeoBackup(object):
     def download_metadata_json(self, vimeo_id: int):
         print("\n\n----------------------------------------")
         print(f"Retrieving metadata for {vimeo_id} (取得影片 {vimeo_id} 的 metadata)")
-        response = self.vimeo_connection.get("/videos/%i" % vimeo_id)
+        response = self.vimeo_connection.get(f"/videos/{vimeo_id}")
         return response.text
 
     def _download(self, vimeo_id, metadata_json):
@@ -325,7 +324,6 @@ class VimeoBackup(object):
             next_uri = returned["paging"]["next"]
             for video in returned["data"]:
                 videos_list.append(video)
-        # 使用 ThreadPoolExecutor 進行併發下載
         from concurrent.futures import ThreadPoolExecutor, as_completed
         results = {}
         max_workers = min(concurrency, 10)
@@ -338,11 +336,46 @@ class VimeoBackup(object):
                 try:
                     local_path = future.result()
                     results[vimeo_id] = local_path
-                    # 在印出下載成功前加入換行
                     print(f"\nDownloaded video {vimeo_id} at: {local_path} (影片 {vimeo_id} 下載成功)")
                 except Exception as e:
                     print(f"影片 {vimeo_id} 下載失敗 (Failed downloading video {vimeo_id}): {e}", file=sys.stderr)
         return results
+
+    def show_folder_structure(self):
+        """Retrieve folder structure via Vimeo API and display & save the summary.
+        呼叫 Vimeo API 取得資料夾結構，並顯示與儲存摘要資訊。
+        """
+        folders = []
+        next_uri = "/me/folders"
+        while next_uri is not None:
+            print(f"Retrieving folders from {next_uri} (取得資料夾 {next_uri})")
+            response = self.vimeo_connection.get(next_uri)
+            data = response.json()
+            folders.extend(data["data"])
+            next_uri = data["paging"].get("next")
+        # 整理結構：每個資料夾的 ID、名稱、影片總數、子資料夾總數（若有提供）
+        folder_summary = []
+        for folder in folders:
+            folder_id = folder["uri"].split("/")[-1]
+            name = folder.get("name", "")
+            videos_total = folder.get("metadata", {}).get("connections", {}).get("videos", {}).get("total", 0)
+            subfolders_total = folder.get("metadata", {}).get("connections", {}).get("folders", {}).get("total", 0)
+            folder_summary.append({
+                "folder_id": folder_id,
+                "name": name,
+                "videos_total": videos_total,
+                "subfolders_total": subfolders_total
+            })
+        # 以易讀的形式顯示摘要
+        import json
+        print("\n\nFolder Structure (資料夾結構):")
+        print(json.dumps(folder_summary, indent=4, ensure_ascii=False))
+        # 將摘要存成 JSON 檔案於 local_root 下
+        output_path = op.join(self.local_root, "folder_structure.json")
+        with open(output_path, "w", encoding="utf-8") as fp:
+            json.dump(folder_summary, fp, indent=4, ensure_ascii=False)
+        print(f"\nFolder structure saved to {output_path} (資料夾結構已存檔於 {output_path})")
+        return folder_summary
 
 if __name__ == "__main__":
     import argparse
@@ -359,6 +392,7 @@ if __name__ == "__main__":
     sync_parser = subparsers.add_parser("sync", help="Sync local data with vimeo.com. / 同步 Vimeo 帳戶內所有影片")
     check_parser = subparsers.add_parser("check", help="Check mtime for specific Video(s) by id. / 檢查指定影片的修改時間")
     check_parser.add_argument("vimeo_ids", type=int, nargs="+", help="Vimeo 影片 ID(s)")
+    folder_parser = subparsers.add_parser("show_folder_structure", help="Show folder structure from Vimeo API. / 顯示 Vimeo 資料夾結構")
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
@@ -375,7 +409,6 @@ if __name__ == "__main__":
         report = lambda *x, **y: print(*x, **y, file=sys.stderr)
     backup = VimeoBackup.from_config_file(config_file_path)
     if args.command == "download":
-        # 使用 ThreadPoolExecutor 併發下載指定影片
         from concurrent.futures import ThreadPoolExecutor, as_completed
         max_workers = min(args.concurrency, 10)
         print(f"開始併發下載影片 (Start concurrent downloads) with {max_workers} threads")
@@ -396,3 +429,5 @@ if __name__ == "__main__":
                 backup.ensure_current(v_id)
             except DownloadLocked:
                 pass
+    elif args.command == "show_folder_structure":
+        backup.show_folder_structure()
