@@ -18,3 +18,5 @@ src
 fcgi-wrapper/
 www/site.wrapper
 www/.well-known/
+SwipeVideos
+vimeo_backup_swipe.rc

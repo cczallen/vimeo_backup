@@ -1,0 +1,17 @@
+# -*- mode: python; -*-
+
+# This file must be valid python code and will be evaluated on startup.
+
+# Local directory
+local_root=""
+
+
+# These three keys can be obtained through the Vimeo Developer Site:
+client_id=""
+
+# Required permissions for the access token: private, video_files and public.
+access_token=""
+
+client_secret=""
+
+
