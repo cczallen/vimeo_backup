@@ -5,23 +5,37 @@ This script will maintain a local copy of your uploads to vimeo.com using the of
 
 import sys, os, os.path as op, re, threading, functools, datetime, runpy, time
 import urllib.request, urllib.parse, json, shutil
+from tqdm import tqdm
 from contextlib import contextmanager
 import dateutil.parser
 
 import ssl
 import certifi
-
 # 建立 SSL 上下文，使用 certifi 提供的根憑證
 ssl_context = ssl.create_default_context(cafile=certifi.where())
 
 # 使用官方 PyVimeo
 from vimeo import VimeoClient
 
-# 以下 t4 模組若無法取得，請自行實作簡易版本
+# 以下 t4 模組若無法取得，請自行實作簡易版本：
+# 請建立 t4/title_to_id.py 與 t4/typography.py 參考示例：
+# --- t4/title_to_id.py ---
+# import re
+# def safe_filename(name):
+#     return re.sub(r'[\\/:"*?<>|]+', "", name)
+#
+# --- t4/typography.py ---
+# def pretty_bytes(num):
+#     for unit in ['B','KB','MB','GB','TB']:
+#         if num < 1024.0:
+#             return f"{num:.1f}{unit}"
+#         num /= 1024.0
+#     return f"{num:.1f}PB"
+
 from t4.title_to_id import safe_filename
 from t4.typography import pretty_bytes
 
-# 若環境中發生 collections.MutableMapping 問題，可啟用以下 patch：
+# 若環境中出現 collections.MutableMapping 問題（Python 3.10+），則補上：
 import collections
 import collections.abc
 if not hasattr(collections, 'MutableMapping'):
@@ -48,12 +62,11 @@ def original_ctime(metadata):
             "No original download available for %s “%s”" % (video_id, metadata["name"]))
 
 def report_progress_on(item, done, extra=None, metainfo=None):
-    # 進度回報，可自行實作
+    # 進度回報，可自行擴充
     pass
 
 def report(*things, end="\n"):
-    # 一般訊息回報
-    pass
+    print(*things, end=end, file=sys.stderr)
 
 class ArchiveDir(object):
     def __init__(self, backup, dirname):
@@ -68,7 +81,6 @@ class ArchiveDir(object):
 
     @classmethod
     def download(cls, backup, metadata_json):
-        """Download the original video and create an archive directory."""
         metadata = json.loads(metadata_json)
         uri = metadata["uri"]
         rest, vimeo_id = uri.rsplit("/", 1)
@@ -84,15 +96,21 @@ class ArchiveDir(object):
                 "No original download available for %i “%s”" % (vimeo_id, metadata["name"]))
 
         url = original_download["link"]
+        size = original_download["size"]
+        # 印出影片資訊與分隔線
+        print("\n-----")
+        print(f"下載影片 ID: {vimeo_id}  Title: {metadata['name']}")
+        print(f"檔案大小: {pretty_bytes(size)}")
+        print(f"下載網址: {url}")
+
         fields = urllib.parse.urlparse(url)
         path = urllib.parse.unquote(fields.path)
         parts = path.split("/")
         filename = safe_filename(parts[-1])
         fn, ext = op.splitext(filename)
-        name = metadata["name"]
-        filename = safe_filename(name)
-        dirname = "%i %s" % (vimeo_id, filename)
-        filename += ext
+        title = safe_filename(metadata["name"])
+        filename = f"{title}{ext}"
+        dirname = f"{vimeo_id} {title}"
 
         tmppath = op.join(backup.local_root, "tmp." + dirname)
         os.mkdir(tmppath)
@@ -100,31 +118,30 @@ class ArchiveDir(object):
         try:
             with open(op.join(tmppath, "metadata.json"), "w", encoding="utf-8") as fp:
                 fp.write(metadata_json)
-            size = original_download["size"]
-            msg = f"Loading “{filename}”"
-            report(msg, end="")
+
             outpath = op.join(tmppath, filename)
+            print(f"開始下載 {filename} ...")
+            start_time = time.time()
             with urllib.request.urlopen(url, context=ssl_context) as infp, open(outpath, "wb") as outfp:
-                bytes_read = 0
                 blocksize = 102400
-                while True:
-                    bytes_chunk = infp.read(blocksize)
-                    if len(bytes_chunk) == 0:
-                        break
-                    else:
+                # 使用 tqdm 進度條，設定更新間隔為 1 秒
+                with tqdm(total=size, unit='B', unit_scale=True, desc=filename, mininterval=1) as pbar:
+                    while True:
+                        bytes_chunk = infp.read(blocksize)
+                        if not bytes_chunk:
+                            break
                         outfp.write(bytes_chunk)
-                        bytes_read += len(bytes_chunk)
-                        report_progress_on(msg,
-                                           float(bytes_read) / float(size),
-                                           pretty_bytes(bytes_read),
-                                           metainfo={"vimeo_id": vimeo_id})
-            report(" done.")
+                        pbar.update(len(bytes_chunk))
+            end_time = time.time()
+            elapsed = end_time - start_time
+            avg_speed = size / elapsed if elapsed > 0 else 0
+            print(f"下載完成 {filename}: 用時 {elapsed:.1f} 秒，平均速度 {pretty_bytes(avg_speed)}/s")
             if os.path.getsize(outpath) != size:
                 try:
                     os.unlink(outpath)
                 except IOError:
                     pass
-                raise IOError("Failed to download " + url)
+                raise IOError("下載失敗: " + url)
         except (Exception, KeyboardInterrupt) as e:
             shutil.rmtree(tmppath, ignore_errors=True)
             raise
@@ -216,7 +233,9 @@ class VimeoBackup(object):
         return self._vimeo_connection
 
     def download_metadata_json(self, vimeo_id: int):
-        report("Retrieving metadata for", vimeo_id)
+        # 印出分隔線與換行
+        print("\n\n----------------------------------------")
+        print(f"Retrieving metadata for {vimeo_id}")
         response = self.vimeo_connection.get("/videos/%i" % vimeo_id)
         return response.text
 
